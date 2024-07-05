@@ -126,7 +126,7 @@ func writeLsblkGauges(w io.Writer) {
 		metrics.WriteGaugeUint64(
 			w,
 			metricString(Namespace, "lsblk", "info", prometheus.Labels{
-				"name":    dev.Name,
+				"device":  dev.Name,
 				"path":    dev.Path,
 				"major":   strings.Split(dev.MajorMinor, ":")[0],
 				"minor":   strings.Split(dev.MajorMinor, ":")[1],
