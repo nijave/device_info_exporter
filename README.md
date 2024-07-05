@@ -1,6 +1,6 @@
 # Device Info Exporter
-Exports additional metadata from ZFS pools and `lsblk` which can be joined to `node_exporter` metrics for additional context.
-It is recommended to create recording rules to enrich data coming in.
+Exports additional metadata from ZFS pools, `lsblk`, and `udev` which can be joined to `node_exporter` metrics for additional context.
+It is recommended to create recording rules to enrich data coming in. Using `major:minor` is the most reliable way to correlate data.
 
 ## Usage
 ```
@@ -9,7 +9,7 @@ It is recommended to create recording rules to enrich data coming in.
 ```
 
 ## ZFS Example
-Block device bandwidth by zpool devices
+Block device bandwidth by zpool devices. Additional filtering may be needed on `link` or `instance` to prevent overlapping series.
 ```
 sort_desc(sum(rate(
     (node_disk_read_bytes_total{instance="my-node:9100"}
