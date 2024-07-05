@@ -84,49 +84,6 @@ func labelsForDevice(dev *udev.Device, labelMap *map[string]string) prometheus.L
 	return labels
 }
 
-func writeDeviceMapperGauges(w io.Writer) {
-	ctx := context.Background()
-	ctxTimeout, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	defer cancel()
-
-	cmd, err := exec.CommandContext(
-		ctxTimeout,
-		"dmsetup", "info",
-		"-co", "name,major,minor,attr,uuid",
-		"--noheadings",
-		"--sep", "*",
-	).Output()
-
-	if err != nil {
-		klog.ErrorS(err, "error executing dmsetup info")
-		return
-	}
-
-	output := strings.Trim(string(cmd), "\n\r ")
-
-	if output == "No devices found" {
-		klog.Warningln("no devices found")
-	}
-
-	devices := strings.Split(output, "\n")
-
-	for _, deviceLine := range devices {
-		device := strings.Split(deviceLine, "*")
-		klog.InfoS("found device", "device", device)
-		metrics.WriteGaugeUint64(
-			w,
-			metricString(Namespace, "devicemapper", "info", prometheus.Labels{
-				"name":  device[0],
-				"major": device[1],
-				"minor": device[2],
-				"attr":  device[3],
-				"uuid":  device[4],
-			}),
-			1,
-		)
-	}
-}
-
 type blockDevice struct {
 	Name       string `json:"kname"`
 	Path       string `json:"path"`
@@ -283,7 +240,6 @@ func writeZfsGauges(w io.Writer) {
 func main() {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 		klog.InfoS("handling request", "src", req.RemoteAddr)
-		//writeDeviceMapperGauges(w)
 		writeLsblkGauges(w)
 		writeUdevGauges(w)
 		writeZfsGauges(w)
