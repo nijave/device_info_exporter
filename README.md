@@ -2,6 +2,12 @@
 Exports additional metadata from ZFS pools and `lsblk` which can be joined to `node_exporter` metrics for additional context.
 It is recommended to create recording rules to enrich data coming in.
 
+## Usage
+```
+# Listens on 9133/tcp
+./device_info_exporter
+```
+
 ## ZFS Example
 Block device bandwidth by zpool devices
 ```
