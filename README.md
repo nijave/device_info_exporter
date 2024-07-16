@@ -11,13 +11,11 @@ It is recommended to create recording rules to enrich data coming in. Using `maj
 ## Disk I/O with devicemapper name
 ```
 max(
-    rate(
-        (
+    rate((
         label_replace(node_disk_writes_completed_total, "node", "$1", "instance", "(.+):.*") 
         * on(node, job, device) group_left(name, major, minor, wwn, path) 
             label_replace(device_lsblk_info, "node", "$1", "instance", "(.+):.*")
-            )[$__rate_interval:]
-    )
+    )[$__rate_interval:])
 ) by (cluster, instance, job, major, minor, name, path)
 ```
 

@@ -7,7 +7,6 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 	zfs "github.com/bicomsystems/go-libzfs"
 	udev "github.com/farjump/go-libudev"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"k8s.io/klog/v2"
 	"net/http"
@@ -17,68 +16,109 @@ import (
 	"time"
 )
 
+type OrderedDict struct {
+	keys   []string
+	values map[string]string
+}
+
+func NewOrderedDict() *OrderedDict {
+	return &OrderedDict{
+		keys:   []string{},
+		values: make(map[string]string),
+	}
+}
+
+func (od *OrderedDict) Set(key string, value string) {
+	if _, exists := od.values[key]; !exists {
+		od.keys = append(od.keys, key)
+	}
+	od.values[key] = value
+}
+
+func (od *OrderedDict) Get(key string) (string, bool) {
+	value, exists := od.values[key]
+	return value, exists
+}
+
+func (od *OrderedDict) Keys() []string {
+	return od.keys
+}
+
+func allowedUdevPropertiesSimpleInit() *OrderedDict {
+	od := NewOrderedDict()
+
+	od.Set("devname", "device")
+	od.Set("devpath", "path")
+	od.Set("major", "")
+	od.Set("minor", "")
+
+	return od
+}
+
+func allowedUdevPropertiesInit() *OrderedDict {
+	od := NewOrderedDict()
+
+	// Adding key-value pairs to OrderedDict
+	od.Set("devname", "device")
+	od.Set("devpath", "path")
+	od.Set("major", "")
+	od.Set("minor", "")
+	od.Set("id_bus", "bus")
+	od.Set("scsi_type", "type")
+	//od.Set("scsi_model", "")
+	//od.Set("scsi_ident_serial", "")
+	od.Set("id_model", "model")
+	// This is the same as wwn for scsi devices
+	//od.Set("id_serial", "serial")
+	od.Set("id_scsi_serial", "serial")
+	od.Set("id_path", "id")
+	od.Set("id_wwn", "wwn")
+	od.Set("id_fs_uuid", "fs_uuid")
+	od.Set("id_fs_type", "fs_type")
+	od.Set("id_part_table_type", "part_table_type")
+
+	return od
+}
+
 var (
-	Namespace = "device"
-
-	allowedUdevPropertiesSimple = &map[string]string{
-		"devname": "device",
-		"devpath": "path",
-		"major":   "",
-		"minor":   "",
-	}
-
-	allowedUdevProperties = &map[string]string{
-		"devname":   "device",
-		"devpath":   "path",
-		"major":     "",
-		"minor":     "",
-		"id_bus":    "bus",
-		"scsi_type": "type",
-		//"scsi_model":         "",
-		//"scsi_ident_serial":  "",
-		"id_model": "model",
-		// This is the same as wwn for scsi devices
-		//"id_serial":          "serial",
-		"id_scsi_serial":     "serial",
-		"id_path":            "id",
-		"id_wwn":             "wwn",
-		"id_fs_uuid":         "fs_uuid",
-		"id_fs_type":         "fs_type",
-		"id_part_table_type": "part_table_type",
-	}
+	Namespace                   = "device"
+	allowedUdevPropertiesSimple = allowedUdevPropertiesSimpleInit()
+	allowedUdevProperties       = allowedUdevPropertiesInit()
 )
 
-func metricString(namespace, subsystem, name string, labels prometheus.Labels) string {
+func metricString(namespace, subsystem, name string, labels *OrderedDict) string {
 	labelPairs := make([]string, 0)
-	for k, v := range labels {
+	for _, k := range labels.Keys() {
+		v, _ := labels.Get(k)
 		labelPairs = append(labelPairs, fmt.Sprintf("%s=\"%s\"", k, v))
 	}
 	return fmt.Sprintf(`%s_%s_%s{%s}`, namespace, subsystem, name, strings.Join(labelPairs, ","))
 }
 
-func labelsForDevice(dev *udev.Device, labelMap *map[string]string) prometheus.Labels {
+func labelsForDevice(dev *udev.Device, labelMap *OrderedDict) *OrderedDict {
 	allowedLabels := *labelMap
-	labels := prometheus.Labels{}
+	labels := NewOrderedDict()
 
-	for k, newKey := range allowedLabels {
+	for _, k := range allowedLabels.Keys() {
+		newKey, _ := allowedLabels.Get(k)
 		if newKey != "" {
 			k = newKey
 		}
-		labels[k] = ""
+		labels.Set(k, "")
 	}
 
 	for k, v := range dev.Properties() {
 		k = strings.ToLower(k)
 
-		if _, ok := allowedLabels[k]; !ok {
+		if _, ok := allowedLabels.Get(k); !ok {
 			continue
 		}
 
-		if newKey, ok := allowedLabels[k]; ok && newKey != "" {
+		if newKey, ok := allowedLabels.Get(k); ok && newKey != "" {
 			k = newKey
 		}
 
-		labels[k] = v
+		labels.Set(k, v)
 	}
 
 	return labels
@@ -123,21 +163,21 @@ func writeLsblkGauges(w io.Writer) {
 	}
 
 	for _, dev := range blockDevices.BlockDevices {
+		labels := NewOrderedDict()
+		labels.Set("device", dev.Name)
+		labels.Set("path", dev.Path)
+		labels.Set("name", filepath.Base(dev.Path))
+		labels.Set("major", strings.Split(dev.MajorMinor, ":")[0])
+		labels.Set("minor", strings.Split(dev.MajorMinor, ":")[1])
+		labels.Set("type", dev.Type)
+		labels.Set("fs_type", dev.FsType)
+		labels.Set("label", dev.Label)
+		labels.Set("uuid", dev.UUID)
+		labels.Set("serial", dev.Serial)
+		labels.Set("wwn", dev.WWN)
 		metrics.WriteGaugeUint64(
 			w,
-			metricString(Namespace, "lsblk", "info", prometheus.Labels{
-				"device":  dev.Name,
-				"path":    dev.Path,
-				"name":    filepath.Base(dev.Path),
-				"major":   strings.Split(dev.MajorMinor, ":")[0],
-				"minor":   strings.Split(dev.MajorMinor, ":")[1],
-				"type":    dev.Type,
-				"fs_type": dev.FsType,
-				"label":   dev.Label,
-				"uuid":    dev.UUID,
-				"serial":  dev.Serial,
-				"wwn":     dev.WWN,
-			}),
+			metricString(Namespace, "lsblk", "info", labels),
 			1,
 		)
 	}
@@ -164,14 +204,14 @@ func writeUdevGauges(w io.Writer) {
 			)
 
 			for link, _ := range dev.Devlinks() {
+				labels := NewOrderedDict()
+				labels.Set("path", dev.Devpath())
+				labels.Set("device", dev.Sysname())
+				labels.Set("link", link)
+				labels.Set("link_name", filepath.Base(link))
 				metrics.WriteGaugeUint64(
 					w,
-					metricString(Namespace, "udev", "link_info", prometheus.Labels{
-						"path":      dev.Devpath(),
-						"device":    dev.Sysname(),
-						"link":      link,
-						"link_name": filepath.Base(link),
-					}),
+					metricString(Namespace, "udev", "link_info", labels),
 					1,
 				)
 			}
@@ -210,21 +250,43 @@ func writeZfsGauges(w io.Writer) {
 			vdevTree = devices[0]
 			devices = devices[1:]
 
-			for _, subTree := range vdevTree.Devices {
+			var subTree zfs.VDevTree
+
+			//if vdevTree.Path == "" {
+			//	vdevTree.Path = poolName
+			//}
+
+			for _, subTree = range vdevTree.Devices {
+				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
 				devices = append([]zfs.VDevTree{subTree}, devices...)
+			}
+
+			for _, subTree = range vdevTree.L2Cache {
+				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
+				devices = append([]zfs.VDevTree{subTree}, devices...)
+			}
+
+			for _, subTree = range vdevTree.Spares {
+				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
+				devices = append([]zfs.VDevTree{subTree}, devices...)
+			}
+
+			if vdevTree.Logs != nil {
+				//vdevTree.Logs.Path = strings.Join([]string{vdevTree.Path, vdevTree.Logs.Name}, "/")
+				devices = append([]zfs.VDevTree{*vdevTree.Logs}, devices...)
 			}
 
 			if len(vdevTree.Devices) == 0 && vdevTree.GUID != 0 {
 				deviceNameParts := strings.Split(vdevTree.Name, "/")
+				labels := NewOrderedDict()
+				labels.Set("type", string(vdevTree.Type))
+				labels.Set("pool", poolName)
+				labels.Set("path", vdevTree.Name)
+				labels.Set("device", deviceNameParts[len(deviceNameParts)-1])
+				labels.Set("guid", fmt.Sprintf("%d", vdevTree.GUID))
 				metrics.WriteGaugeUint64(
 					w,
-					metricString(Namespace, "zfs", "info", prometheus.Labels{
-						"type":   string(vdevTree.Type),
-						"pool":   poolName,
-						"path":   vdevTree.Name,
-						"device": deviceNameParts[len(deviceNameParts)-1],
-						"guid":   fmt.Sprintf("%d", vdevTree.GUID),
-					}),
+					metricString(Namespace, "zfs", "info", labels),
 					1,
 				)
 			}
