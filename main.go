@@ -184,6 +184,57 @@ func writeLsblkGauges(w io.Writer) {
 
 }
 
+type Pv struct {
+	Path        string `json:"pv_name"`
+	VolumeGroup string `json:"vg_name"`
+	Major       string `json:"pv_major"`
+	Minor       string `json:"pv_minor"`
+}
+
+type PvList struct {
+	Pvs []Pv `json:"pv"`
+}
+
+type LvmReport struct {
+	Report []PvList `json:"report"`
+}
+
+func writeLvmGauges(w io.Writer) {
+	ctx := context.Background()
+	timeout, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+
+	cmd, err := exec.CommandContext(timeout,
+		"pvs", "-o", "name,vg_name,major,minor", "--reportformat", "json",
+	).Output()
+
+	if err != nil {
+		klog.ErrorS(err, "error executing pvs")
+		return
+	}
+
+	var report LvmReport
+	err = json.Unmarshal(cmd, &report)
+	if err != nil {
+		klog.ErrorS(err, "error unmarshalling pvs output", "stdout", cmd)
+		return
+	}
+
+	for _, dev := range report.Report[0].Pvs {
+		labels := NewOrderedDict()
+		labels.Set("path", dev.Path)
+		labels.Set("name", filepath.Base(dev.Path))
+		labels.Set("volume_group", dev.VolumeGroup)
+		labels.Set("major", dev.Major)
+		labels.Set("minor", dev.Minor)
+		metrics.WriteGaugeUint64(
+			w,
+			metricString(Namespace, "pv", "info", labels),
+			1,
+		)
+	}
+}
+
 func writeUdevGauges(w io.Writer) {
 	ud := &udev.Udev{}
 	dsp, _ := ud.NewEnumerate().DeviceSyspaths()
@@ -304,6 +355,7 @@ func main() {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 		klog.InfoS("handling request", "src", req.RemoteAddr)
 		writeLsblkGauges(w)
+		writeLvmGauges(w)
 		writeUdevGauges(w)
 		writeZfsGauges(w)
 	})

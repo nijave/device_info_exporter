@@ -9,6 +9,6 @@ set -e
 
 sed -i -e 's/ main/ main contrib non-free/g' /etc/apt/sources.list.d/debian.sources || true
 apt update
-apt install -y golang-1.22 libudev-dev libzfslinux-dev
+apt install -y libudev-dev libzfslinux-dev
 
 go build -v -o device_info_exporter main.go
