@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/VictoriaMetrics/metrics"
-	zfs "github.com/bicomsystems/go-libzfs"
-	udev "github.com/farjump/go-libudev"
 	"io"
 	"k8s.io/klog/v2"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -95,33 +94,67 @@ func metricString(namespace, subsystem, name string, labels *OrderedDict) string
 	return fmt.Sprintf(`%s_%s_%s{%s}`, namespace, subsystem, name, strings.Join(labelPairs, ","))
 }
 
-func labelsForDevice(dev *udev.Device, labelMap *OrderedDict) *OrderedDict {
-	allowedLabels := *labelMap
+func labelsFromProperties(props map[string]string, labelMap *OrderedDict) *OrderedDict {
 	labels := NewOrderedDict()
 
-	for _, k := range allowedLabels.Keys() {
-		newKey, _ := allowedLabels.Get(k)
+	for _, k := range labelMap.Keys() {
+		newKey, _ := labelMap.Get(k)
 		if newKey != "" {
-			k = newKey
+			labels.Set(newKey, "")
+		} else {
+			labels.Set(k, "")
 		}
-		labels.Set(k, "")
 	}
 
-	for k, v := range dev.Properties() {
+	for k, v := range props {
 		k = strings.ToLower(k)
-
-		if _, ok := allowedLabels.Get(k); !ok {
+		if _, ok := labelMap.Get(k); !ok {
 			continue
 		}
-
-		if newKey, ok := allowedLabels.Get(k); ok && newKey != "" {
+		if newKey, ok := labelMap.Get(k); ok && newKey != "" {
 			k = newKey
 		}
-
 		labels.Set(k, v)
 	}
 
 	return labels
+}
+
+func readUevent(sysPath string) map[string]string {
+	data, err := os.ReadFile(filepath.Join(sysPath, "uevent"))
+	if err != nil {
+		return nil
+	}
+	props := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			props[k] = v
+		}
+	}
+	return props
+}
+
+type udevDBEntry struct {
+	props map[string]string
+	links []string
+}
+
+func readUdevDB(major, minor string) udevDBEntry {
+	entry := udevDBEntry{props: make(map[string]string)}
+	data, err := os.ReadFile(fmt.Sprintf("/run/udev/data/b%s:%s", major, minor))
+	if err != nil {
+		return entry
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "E:"); ok {
+			if k, v, found := strings.Cut(rest, "="); found {
+				entry.props[k] = v
+			}
+		} else if rest, ok := strings.CutPrefix(line, "S:"); ok {
+			entry.links = append(entry.links, "/dev/"+rest)
+		}
+	}
+	return entry
 }
 
 type blockDevice struct {
@@ -245,118 +278,278 @@ func writeLvmGauges(w io.Writer) {
 }
 
 func writeUdevGauges(w io.Writer) {
-	ud := &udev.Udev{}
-	dsp, _ := ud.NewEnumerate().DeviceSyspaths()
-	for _, path := range dsp {
-		dev := ud.NewDeviceFromSyspath(path)
-
-		// TODO: filter with the udev interface
-		if dev.Subsystem() == "block" {
-			labelMap := allowedUdevPropertiesSimple
-			if dev.PropertyValue("ID_BUS") == "scsi" {
-				labelMap = allowedUdevProperties
-			}
-			labels := labelsForDevice(dev, labelMap)
-			metrics.WriteGaugeUint64(
-				w,
-				metricString(Namespace, "udev", "info", labels),
-				1,
-			)
-
-			for link, _ := range dev.Devlinks() {
-				labels := NewOrderedDict()
-				labels.Set("path", dev.Devpath())
-				labels.Set("device", dev.Sysname())
-				labels.Set("link", link)
-				labels.Set("link_name", filepath.Base(link))
-				metrics.WriteGaugeUint64(
-					w,
-					metricString(Namespace, "udev", "link_info", labels),
-					1,
-				)
-			}
-		}
-
-	}
-}
-
-func writeZfsGauges(w io.Writer) {
-	pools, err := zfs.PoolOpenAll()
+	entries, err := os.ReadDir("/sys/class/block")
 	if err != nil {
-		klog.ErrorS(err, "zfs pool open failed")
+		klog.ErrorS(err, "error reading /sys/class/block")
 		return
 	}
 
-	for _, pool := range pools {
-		poolName, err := pool.Name()
-		if err != nil {
-			klog.ErrorS(err, "zfs pool name failed")
-			pool.Close()
+	for _, entry := range entries {
+		sysPath := filepath.Join("/sys/class/block", entry.Name())
+
+		uevent := readUevent(sysPath)
+		if uevent == nil {
 			continue
 		}
 
-		devices := make([]zfs.VDevTree, 1)
+		major := uevent["MAJOR"]
+		minor := uevent["MINOR"]
 
-		vdevTree, err := pool.VDevTree()
+		realPath, err := filepath.EvalSymlinks(sysPath)
 		if err != nil {
-			klog.ErrorS(err, "zfs pool root vdev tree failed", "pool", poolName)
-			pool.Close()
+			continue
+		}
+		devpath := strings.TrimPrefix(realPath, "/sys")
+
+		udevDB := readUdevDB(major, minor)
+
+		allProps := make(map[string]string)
+		for k, v := range uevent {
+			allProps[k] = v
+		}
+		for k, v := range udevDB.props {
+			allProps[k] = v
+		}
+
+		devname := allProps["DEVNAME"]
+		if !strings.HasPrefix(devname, "/") {
+			devname = "/dev/" + devname
+		}
+		allProps["DEVNAME"] = devname
+		allProps["DEVPATH"] = devpath
+
+		labelMap := allowedUdevPropertiesSimple
+		if strings.EqualFold(allProps["ID_BUS"], "scsi") {
+			labelMap = allowedUdevProperties
+		}
+		labels := labelsFromProperties(allProps, labelMap)
+		metrics.WriteGaugeUint64(
+			w,
+			metricString(Namespace, "udev", "info", labels),
+			1,
+		)
+
+		for _, link := range udevDB.links {
+			linkLabels := NewOrderedDict()
+			linkLabels.Set("path", devpath)
+			linkLabels.Set("device", entry.Name())
+			linkLabels.Set("link", link)
+			linkLabels.Set("link_name", filepath.Base(link))
+			metrics.WriteGaugeUint64(
+				w,
+				metricString(Namespace, "udev", "link_info", linkLabels),
+				1,
+			)
+		}
+	}
+}
+
+type zpoolStatusOutput struct {
+	Pools map[string]zpoolPool `json:"pools"`
+}
+
+type zpoolPool struct {
+	Name  string               `json:"name"`
+	Vdevs map[string]zpoolVdev `json:"vdevs"`
+}
+
+type zpoolVdev struct {
+	Name     string               `json:"name"`
+	VdevType string               `json:"vdev_type"`
+	GUID     string               `json:"guid"`
+	Path     string               `json:"path"`
+	Vdevs    map[string]zpoolVdev `json:"vdevs"`
+}
+
+func writeVdevLeafGauges(w io.Writer, poolName string, vdev zpoolVdev) {
+	for _, child := range vdev.Vdevs {
+		writeVdevLeafGauges(w, poolName, child)
+	}
+
+	if len(vdev.Vdevs) == 0 && vdev.VdevType != "root" && vdev.GUID != "0" {
+		path := vdev.Path
+		if path == "" {
+			path = vdev.Name
+		}
+		deviceNameParts := strings.Split(path, "/")
+		labels := NewOrderedDict()
+		labels.Set("type", vdev.VdevType)
+		labels.Set("pool", poolName)
+		labels.Set("path", path)
+		labels.Set("device", deviceNameParts[len(deviceNameParts)-1])
+		labels.Set("guid", vdev.GUID)
+		metrics.WriteGaugeUint64(
+			w,
+			metricString(Namespace, "zfs", "info", labels),
+			1,
+		)
+	}
+}
+
+type vdevNode struct {
+	name     string
+	vdevType string
+	children []*vdevNode
+}
+
+func (n *vdevNode) toZpoolVdev() zpoolVdev {
+	vdevs := make(map[string]zpoolVdev, len(n.children))
+	for _, child := range n.children {
+		vdevs[child.name] = child.toZpoolVdev()
+	}
+	return zpoolVdev{
+		Name:     n.name,
+		VdevType: n.vdevType,
+		Path:     n.name,
+		Vdevs:    vdevs,
+	}
+}
+
+func classifyVdevName(name, poolName string) string {
+	switch {
+	case strings.HasPrefix(name, "mirror"):
+		return "mirror"
+	case strings.HasPrefix(name, "raidz"):
+		return "raidz"
+	case strings.HasPrefix(name, "spare"):
+		return "spare"
+	case strings.HasPrefix(name, "log"):
+		return "log"
+	case strings.HasPrefix(name, "cache"):
+		return "cache"
+	case strings.HasPrefix(name, "special"):
+		return "special"
+	case strings.HasPrefix(name, "dedup"):
+		return "dedup"
+	case name == poolName:
+		return "root"
+	default:
+		return "disk"
+	}
+}
+
+func parseZpoolStatusText(output string) zpoolStatusOutput {
+	result := zpoolStatusOutput{Pools: make(map[string]zpoolPool)}
+	var currentPool string
+	inConfig := false
+
+	type stackEntry struct {
+		indent int
+		node   *vdevNode
+	}
+	var stack []stackEntry
+	var roots []*vdevNode
+
+	flushPool := func() {
+		if currentPool == "" {
+			return
+		}
+		pool := zpoolPool{
+			Name:  currentPool,
+			Vdevs: make(map[string]zpoolVdev, len(roots)),
+		}
+		for _, root := range roots {
+			pool.Vdevs[root.name] = root.toZpoolVdev()
+		}
+		result.Pools[currentPool] = pool
+		roots = nil
+		stack = nil
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "pool:") {
+			flushPool()
+			currentPool = strings.TrimSpace(strings.TrimPrefix(trimmed, "pool:"))
+			inConfig = false
 			continue
 		}
 
-		devices = append(devices, vdevTree)
-
-		for {
-			vdevTree = devices[0]
-			devices = devices[1:]
-
-			var subTree zfs.VDevTree
-
-			//if vdevTree.Path == "" {
-			//	vdevTree.Path = poolName
-			//}
-
-			for _, subTree = range vdevTree.Devices {
-				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
-				devices = append([]zfs.VDevTree{subTree}, devices...)
-			}
-
-			for _, subTree = range vdevTree.L2Cache {
-				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
-				devices = append([]zfs.VDevTree{subTree}, devices...)
-			}
-
-			for _, subTree = range vdevTree.Spares {
-				//subTree.Path = strings.Join([]string{vdevTree.Path, subTree.Name}, "/")
-				devices = append([]zfs.VDevTree{subTree}, devices...)
-			}
-
-			if vdevTree.Logs != nil {
-				//vdevTree.Logs.Path = strings.Join([]string{vdevTree.Path, vdevTree.Logs.Name}, "/")
-				devices = append([]zfs.VDevTree{*vdevTree.Logs}, devices...)
-			}
-
-			if len(vdevTree.Devices) == 0 && vdevTree.GUID != 0 {
-				deviceNameParts := strings.Split(vdevTree.Name, "/")
-				labels := NewOrderedDict()
-				labels.Set("type", string(vdevTree.Type))
-				labels.Set("pool", poolName)
-				labels.Set("path", vdevTree.Name)
-				labels.Set("device", deviceNameParts[len(deviceNameParts)-1])
-				labels.Set("guid", fmt.Sprintf("%d", vdevTree.GUID))
-				metrics.WriteGaugeUint64(
-					w,
-					metricString(Namespace, "zfs", "info", labels),
-					1,
-				)
-			}
-
-			if len(devices) < 1 {
-				break
-			}
+		if strings.HasPrefix(trimmed, "config:") {
+			inConfig = true
+			continue
 		}
 
-		pool.Close()
+		if !inConfig || currentPool == "" {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "NAME") || trimmed == "" {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "errors:") {
+			inConfig = false
+			continue
+		}
+
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+
+		name := fields[0]
+		node := &vdevNode{
+			name:     name,
+			vdevType: classifyVdevName(name, currentPool),
+		}
+
+		for len(stack) > 0 && stack[len(stack)-1].indent >= indent {
+			stack = stack[:len(stack)-1]
+		}
+
+		if len(stack) == 0 {
+			roots = append(roots, node)
+		} else {
+			stack[len(stack)-1].node.children = append(stack[len(stack)-1].node.children, node)
+		}
+		stack = append(stack, stackEntry{indent: indent, node: node})
+	}
+
+	flushPool()
+	return result
+}
+
+func writeZfsGauges(w io.Writer) {
+	ctx := context.Background()
+	timeout, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+
+	cmd, err := exec.CommandContext(timeout,
+		"zpool", "status", "-j", "-P",
+	).Output()
+
+	if err != nil {
+		klog.V(2).InfoS("zpool status -j failed, trying text mode", "err", err)
+		cmd, err = exec.CommandContext(timeout,
+			"zpool", "status", "-P",
+		).Output()
+		if err != nil {
+			klog.ErrorS(err, "error executing zpool status")
+			return
+		}
+		status := parseZpoolStatusText(string(cmd))
+		for poolName, pool := range status.Pools {
+			for _, vdev := range pool.Vdevs {
+				writeVdevLeafGauges(w, poolName, vdev)
+			}
+		}
+		return
+	}
+
+	var status zpoolStatusOutput
+	err = json.Unmarshal(cmd, &status)
+	if err != nil {
+		klog.ErrorS(err, "error unmarshalling zpool status output", "stdout", cmd)
+		return
+	}
+
+	for poolName, pool := range status.Pools {
+		for _, vdev := range pool.Vdevs {
+			writeVdevLeafGauges(w, poolName, vdev)
+		}
 	}
 }
 
