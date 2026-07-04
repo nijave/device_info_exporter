@@ -7,6 +7,7 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 	"io"
 	"k8s.io/klog/v2"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -126,7 +127,7 @@ func readUevent(sysPath string) map[string]string {
 		return nil
 	}
 	props := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
 			props[k] = v
 		}
@@ -145,7 +146,7 @@ func readUdevDB(major, minor string) udevDBEntry {
 	if err != nil {
 		return entry
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if rest, ok := strings.CutPrefix(line, "E:"); ok {
 			if k, v, found := strings.Cut(rest, "="); found {
 				entry.props[k] = v
@@ -304,12 +305,8 @@ func writeUdevGauges(w io.Writer) {
 		udevDB := readUdevDB(major, minor)
 
 		allProps := make(map[string]string)
-		for k, v := range uevent {
-			allProps[k] = v
-		}
-		for k, v := range udevDB.props {
-			allProps[k] = v
-		}
+		maps.Copy(allProps, uevent)
+		maps.Copy(allProps, udevDB.props)
 
 		devname := allProps["DEVNAME"]
 		if !strings.HasPrefix(devname, "/") {
@@ -456,7 +453,7 @@ func parseZpoolStatusText(output string) zpoolStatusOutput {
 		stack = nil
 	}
 
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		trimmed := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trimmed, "pool:") {

@@ -1,6 +1,6 @@
 module github.com/nijave/device_info_exporter
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/VictoriaMetrics/metrics v1.44.0
