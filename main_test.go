@@ -615,7 +615,7 @@ G:systemd
 	_ = dir
 
 	entry := udevDBEntry{props: make(map[string]string)}
-	for _, line := range strings.Split(dbContent, "\n") {
+	for line := range strings.SplitSeq(dbContent, "\n") {
 		if rest, ok := strings.CutPrefix(line, "E:"); ok {
 			if k, v, found := strings.Cut(rest, "="); found {
 				entry.props[k] = v
