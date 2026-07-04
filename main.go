@@ -126,6 +126,7 @@ func labelsForDevice(dev *udev.Device, labelMap *OrderedDict) *OrderedDict {
 
 type blockDevice struct {
 	Name       string `json:"kname"`
+	Parent     string `json:"pkname"`
 	Path       string `json:"path"`
 	MajorMinor string `json:"maj:min"`
 	Type       string `json:"type"`
@@ -163,10 +164,18 @@ func writeLsblkGauges(w io.Writer) {
 	}
 
 	for _, dev := range blockDevices.BlockDevices {
+		// If the device is already top-level, set parent to itself
+		// so these series can join to partitions and top-level devices
+		// without extra work
+		if dev.Parent == "" {
+			dev.Parent = dev.Name
+		}
+
 		labels := NewOrderedDict()
 		labels.Set("device", dev.Name)
 		labels.Set("path", dev.Path)
 		labels.Set("name", filepath.Base(dev.Path))
+		labels.Set("parent", dev.Parent)
 		labels.Set("major", strings.Split(dev.MajorMinor, ":")[0])
 		labels.Set("minor", strings.Split(dev.MajorMinor, ":")[1])
 		labels.Set("type", dev.Type)
