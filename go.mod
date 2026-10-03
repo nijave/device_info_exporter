@@ -3,7 +3,7 @@ module github.com/nijave/device_info_exporter
 go 1.26.0
 
 require (
-	github.com/VictoriaMetrics/metrics v1.44.0
+	github.com/VictoriaMetrics/metrics v1.44.1
 	k8s.io/klog/v2 v2.140.0
 )
 
